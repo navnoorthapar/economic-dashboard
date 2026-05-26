@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Perspective, Indicator } from '../../types/perspective';
 import { PERSPECTIVES } from '../../types/perspective';
@@ -31,6 +31,111 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
     const [chartType, setChartType] = useState<ChartType>('line');
     const [isPerspectiveOpen, setIsPerspectiveOpen] = useState(false);
     const [isAboutExpanded, setIsAboutExpanded] = useState(false);
+    const [viewMode, setViewMode] = useState<'chart' | 'table'>('chart');
+    const [apiData, setApiData] = useState<any[]>([]);
+    const [isLoadingApiData, setIsLoadingApiData] = useState(false);
+
+    useEffect(() => {
+        if (perspective.id === 'cost-of-living' && selectedIndicator.id === 'cpi') {
+            setIsLoadingApiData(true);
+            fetch('http://localhost:8080/api/bls/cpi')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'REQUEST_SUCCEEDED' && data.Results?.series?.length > 0) {
+                        setApiData(data.Results.series[0].data);
+                    }
+                })
+                .catch(err => console.error("Error fetching CPI data:", err))
+                .finally(() => setIsLoadingApiData(false));
+        }
+    }, [perspective.id, selectedIndicator.id]);
+
+    const processedApiData = useMemo(() => {
+        if (!apiData || apiData.length === 0) return [];
+
+        const getValue = (y: string | number, p: string) => {
+            const row = apiData.find(d => String(d.year) === String(y) && d.period === p);
+            if (!row || !row.value || row.value === '-' || isNaN(parseFloat(row.value))) return null;
+            return parseFloat(row.value);
+        };
+
+        const calcPercentChange = (current: number | null, previous: number | null) => {
+            if (current === null || previous === null || previous === 0) return null;
+            return ((current - previous) / previous) * 100;
+        };
+
+        const getOffsetPeriod = (currentYear: number, currentPeriodStr: string, monthOffset: number) => {
+            if (!currentPeriodStr.startsWith('M')) return { year: currentYear, period: currentPeriodStr };
+            let month = parseInt(currentPeriodStr.slice(1), 10);
+            let year = currentYear;
+            month -= monthOffset;
+            while (month <= 0) {
+                month += 12;
+                year -= 1;
+            }
+            return { year, period: `M${month.toString().padStart(2, '0')}` };
+        };
+
+        const extendedData = apiData.map(row => {
+            const currentYear = parseInt(row.year, 10);
+            const currentVal = (!row.value || row.value === '-' || isNaN(parseFloat(row.value))) ? null : parseFloat(row.value);
+            
+            const yoyRowVal = getValue(currentYear - 1, row.period);
+            const yoy = calcPercentChange(currentVal, yoyRowVal);
+
+            const pm = getOffsetPeriod(currentYear, row.period, 1);
+            const momRowVal = getValue(pm.year, pm.period);
+            const mom = calcPercentChange(currentVal, momRowVal);
+
+            const pq = getOffsetPeriod(currentYear, row.period, 3);
+            const qoqRowVal = getValue(pq.year, pq.period);
+            const qoq = calcPercentChange(currentVal, qoqRowVal);
+
+            const ytdRowVal = getValue(currentYear - 1, 'M12');
+            const ytd = calcPercentChange(currentVal, ytdRowVal);
+
+            return { ...row, yoy, mom, qoq, ytd };
+        });
+
+        const metrics = ['yoy', 'mom', 'qoq', 'ytd'] as const;
+        const stats: Record<string, { mean: number, std: number }> = {};
+
+        metrics.forEach(m => {
+            const validValues = extendedData.map(d => d[m]).filter(v => v !== null && !isNaN(v)) as number[];
+            if (validValues.length > 0) {
+                const mean = validValues.reduce((sum, v) => sum + v, 0) / validValues.length;
+                const variance = validValues.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / validValues.length;
+                const std = Math.sqrt(variance) || 1;
+                stats[m] = { mean, std };
+            } else {
+                stats[m] = { mean: 0, std: 1 };
+            }
+        });
+
+        return extendedData.map(row => {
+            const zScores = {
+                yoy: row.yoy !== null ? (row.yoy - stats.yoy.mean) / stats.yoy.std : null,
+                mom: row.mom !== null ? (row.mom - stats.mom.mean) / stats.mom.std : null,
+                qoq: row.qoq !== null ? (row.qoq - stats.qoq.mean) / stats.qoq.std : null,
+                ytd: row.ytd !== null ? (row.ytd - stats.ytd.mean) / stats.ytd.std : null,
+            };
+            return { ...row, zScores };
+        });
+    }, [apiData]);
+
+    const getHeatMapColor = (zScore: number | null) => {
+        if (zScore === null) return 'transparent';
+        const z = Math.max(-2, Math.min(2, zScore));
+        const hue = 120 - ((z + 2) / 4) * 120;
+        return `hsla(${hue}, 70%, 50%, 0.15)`;
+    };
+
+    const getHeatMapTextColor = (zScore: number | null, isDark: boolean) => {
+        if (zScore === null) return isDark ? '#e2e8f0' : '#1e293b'; // slate-200 or 800
+        const z = Math.max(-2, Math.min(2, zScore));
+        const hue = 120 - ((z + 2) / 4) * 120;
+        return isDark ? `hsl(${hue}, 80%, 75%)` : `hsl(${hue}, 90%, 30%)`;
+    };
 
     const toggleCountry = (c: Country) => {
         if (selectedCountries.includes(c)) {
@@ -151,13 +256,85 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                 ))}
             </AreaChart>
         );
+    }
 
+    const renderTable = () => {
+        if (perspective.id === 'cost-of-living' && selectedIndicator.id === 'cpi') {
+            if (isLoadingApiData) return <div className="flex justify-center items-center h-full"><span className={`text-sm ${t.text}`}>Loading BLS API data...</span></div>;
+            
+            return (
+                <div className="overflow-auto h-full pr-2 pb-2 custom-scrollbar border border-black/5 dark:border-white/5 rounded-lg">
+                    <table className="w-full text-left border-collapse text-xs md:text-sm">
+                        <thead className={`sticky top-0 bg-white/95 dark:bg-[#1a1c23]/95 backdrop-blur-md z-10 border-b ${isDark ? 'border-white/10' : 'border-black/10'}`}>
+                            <tr>
+                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400">Year</th>
+                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400">Period</th>
+                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">CPI Value</th>
+                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">MoM %</th>
+                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">QoQ %</th>
+                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">YoY %</th>
+                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">YTD %</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {processedApiData.map((row, i) => (
+                                <tr key={i} className={`border-b ${isDark ? 'border-white/5 hover:bg-white/5' : 'border-black/5 hover:bg-black/5'}`}>
+                                    <td className="p-3 font-medium text-slate-700 dark:text-slate-300">{row.year}</td>
+                                    <td className="p-3 text-slate-600 dark:text-slate-400">{row.periodName}</td>
+                                    <td className="p-3 font-bold text-slate-800 dark:text-slate-200 text-right">{row.value}</td>
+                                    <td className="p-3 font-bold text-right" style={{ backgroundColor: getHeatMapColor(row.zScores?.mom), color: getHeatMapTextColor(row.zScores?.mom, isDark) }}>
+                                        {row.mom !== null ? (row.mom > 0 ? '+' : '') + row.mom.toFixed(2) + '%' : '-'}
+                                    </td>
+                                    <td className="p-3 font-bold text-right" style={{ backgroundColor: getHeatMapColor(row.zScores?.qoq), color: getHeatMapTextColor(row.zScores?.qoq, isDark) }}>
+                                        {row.qoq !== null ? (row.qoq > 0 ? '+' : '') + row.qoq.toFixed(2) + '%' : '-'}
+                                    </td>
+                                    <td className="p-3 font-bold text-right" style={{ backgroundColor: getHeatMapColor(row.zScores?.yoy), color: getHeatMapTextColor(row.zScores?.yoy, isDark) }}>
+                                        {row.yoy !== null ? (row.yoy > 0 ? '+' : '') + row.yoy.toFixed(2) + '%' : '-'}
+                                    </td>
+                                    <td className="p-3 font-bold text-right" style={{ backgroundColor: getHeatMapColor(row.zScores?.ytd), color: getHeatMapTextColor(row.zScores?.ytd, isDark) }}>
+                                        {row.ytd !== null ? (row.ytd > 0 ? '+' : '') + row.ytd.toFixed(2) + '%' : '-'}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            );
+        }
+
+        const data = getChartData();
+        return (
+            <div className="overflow-auto h-full pr-2 pb-2 custom-scrollbar border border-black/5 dark:border-white/5 rounded-lg">
+                <table className="w-full text-left border-collapse text-xs md:text-sm">
+                    <thead className={`sticky top-0 bg-white/95 dark:bg-[#1a1c23]/95 backdrop-blur-md z-10 border-b ${isDark ? 'border-white/10' : 'border-black/10'}`}>
+                        <tr>
+                            <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400">Year</th>
+                            {selectedCountries.map(c => (
+                                <th key={c} className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">{c}</th>
+                            ))}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {data.map((row, i) => (
+                            <tr key={i} className={`border-b ${isDark ? 'border-white/5 hover:bg-white/5' : 'border-black/5 hover:bg-black/5'}`}>
+                                <td className="p-3 font-medium text-slate-700 dark:text-slate-300">{row.year}</td>
+                                {selectedCountries.map(c => (
+                                    <td key={c} className="p-3 font-bold text-slate-800 dark:text-slate-200 text-right">
+                                        {row[c] ? Number(row[c]).toFixed(2) : '-'}
+                                    </td>
+                                ))}
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        );
     }
 
     return (
         <Layout accentColor={perspective.color} perspectiveName={perspective.title} isDark={isDark} toggleTheme={toggleTheme}>
             <div className="flex flex-col gap-6 max-w-[1600px] mx-auto pb-10 px-4 md:px-8">
-                <div className="group sticky top-14 z-40 py-4 md:py-5 px-8 -mx-8 transition-all duration-500 bg-white/40 dark:bg-white/[0.03] backdrop-blur-xl border border-[#433422]/5 dark:border-white/[0.05] shadow-2xl overflow-hidden max-h-[88px] hover:max-h-[500px] cursor-pointer hover:bg-white/60 dark:hover:bg-white/[0.04] md:rounded-xl">
+                <div className="group sticky top-14 z-40 py-4 md:py-5 px-8 -mx-8 bg-white/40 dark:bg-white/[0.03] backdrop-blur-xl border border-[#433422]/5 dark:border-white/[0.05] shadow-2xl md:rounded-xl">
                     <div className="flex flex-col md:flex-row md:items-start gap-6 md:gap-12 max-w-[1600px] mx-auto">
                         <div className="flex flex-col gap-4 flex-shrink-0">
                             <span className="text-[9px] font-black uppercase tracking-[0.2em] text-[#8c7b60] dark:text-slate-500">Global Markets</span>
@@ -168,10 +345,11 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                                         <button
                                             key={c}
                                             onClick={(e) => { e.stopPropagation(); toggleCountry(c); }}
+                                            style={isSelected ? { borderColor: getCountryColor(c), color: getCountryColor(c) } : {}}
                                             className={clsx(
                                                 "px-5 py-2 text-[10px] rounded-lg font-black transition-all border uppercase tracking-widest whitespace-nowrap",
                                                 isSelected ?
-                                                    `bg-transparent border-2 ${t.border} ${t.text} shadow-lg ${t.shadow}` :
+                                                    `bg-transparent border-2 shadow-lg ${t.shadow}` :
                                                     'bg-black/5 dark:bg-white/[0.03] border-[#433422]/10 dark:border-white/[0.05] text-[#433422]/60 dark:text-slate-500 hover:text-[#433422] dark:hover:text-slate-200 shadow-sm'
                                             )}
                                         >
@@ -187,7 +365,6 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                         <div className="flex flex-col gap-4 w-full">
                             <div className="flex justify-between items-center">
                                 <span className="text-[9px] font-black uppercase tracking-[0.2em] text-[#8c7b60] dark:text-slate-500">Active Indicators</span>
-                                <span className="text-[10px] text-slate-500 md:hidden opacity-50">(Hover to expand)</span>
                             </div>
                             <div className="flex flex-wrap gap-2">
                                 {perspective.indicators.map(ind => {
@@ -314,6 +491,18 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                                 </div>
 
                                 <div className="flex items-center gap-4">
+                                    {perspective.id === 'cost-of-living' && (
+                                        <div className="flex bg-black/5 dark:bg-white/[0.03] p-1 rounded-lg border border-[#433422]/10 dark:border-white/[0.05]">
+                                            <button 
+                                                onClick={() => setViewMode('chart')}
+                                                className={clsx("px-3 py-1.5 text-xs font-bold rounded-md transition-all", viewMode === 'chart' ? "bg-[#433422] dark:bg-white/10 text-white shadow-sm" : "text-[#8c7b60] dark:text-slate-500 hover:text-[#433422] dark:hover:text-white")}
+                                            >Chart</button>
+                                            <button 
+                                                onClick={() => setViewMode('table')}
+                                                className={clsx("px-3 py-1.5 text-xs font-bold rounded-md transition-all", viewMode === 'table' ? "bg-[#433422] dark:bg-white/10 text-white shadow-sm" : "text-[#8c7b60] dark:text-slate-500 hover:text-[#433422] dark:hover:text-white")}
+                                            >Table</button>
+                                        </div>
+                                    )}
                                     <div className="flex p-1 rounded-lg bg-black/5 dark:bg-white/[0.03] border border-[#433422]/10 dark:border-white/[0.05]">
                                         {([
                                             { id: 'area', icon: Activity },
@@ -339,9 +528,11 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                             </div>
 
                             <div className="w-full mt-2 transition-all h-[280px] md:h-[320px]">
-                                <ResponsiveContainer width="100%" height="100%">
-                                    {renderChart()}
-                                </ResponsiveContainer>
+                                {viewMode === 'table' ? renderTable() : (
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        {renderChart()}
+                                    </ResponsiveContainer>
+                                )}
                             </div>
                         </div>
 

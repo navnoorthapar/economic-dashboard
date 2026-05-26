@@ -1,0 +1,67 @@
+Sample apiData: [
+  {
+    year: '2025',
+    period: 'M12',
+    periodName: 'December',
+    value: '324.054',
+    footnotes: [ {} ]
+  },
+  {
+    year: '2025',
+    period: 'M11',
+    periodName: 'November',
+    value: '324.122',
+    footnotes: [ {} ]
+  },
+  {
+    year: '2025',
+    period: 'M10',
+    periodName: 'October',
+    value: '-',
+    footnotes: [ [Object] ]
+  }
+]
+Sample extendedData: [
+  {
+    year: '2025',
+    period: 'M12',
+    periodName: 'December',
+    value: '324.054',
+    footnotes: [ {} ],
+    yoy: 2.6770805278750194,
+    mom: -0.020979754536884405,
+    qoq: -0.22967980295567664,
+    ytd: 2.6770805278750194
+  },
+  {
+    year: '2025',
+    period: 'M11',
+    periodName: 'November',
+    value: '324.122',
+    footnotes: [ {} ],
+    yoy: 2.7350844551226237,
+    mom: NaN,
+    qoq: 0.045065066548144,
+    ytd: 2.698626447616481
+  },
+  {
+    year: '2025',
+    period: 'M10',
+    periodName: 'October',
+    value: '-',
+    footnotes: [ [Object] ],
+    yoy: NaN,
+    mom: NaN,
+    qoq: NaN,
+    ytd: NaN
+  }
+]
+Stats: yoy: mean=NaN, std=1, cnt=108
+mom: mean=NaN, std=1, cnt=119
+qoq: mean=NaN, std=1, cnt=117
+ytd: mean=NaN, std=1, cnt=108
+Sample finalData: [
+  { year: '2025', period: 'M12', zYoy: NaN, zMom: NaN },
+  { year: '2025', period: 'M11', zYoy: NaN, zMom: NaN },
+  { year: '2025', period: 'M10', zYoy: NaN, zMom: NaN }
+]
