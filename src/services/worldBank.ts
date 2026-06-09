@@ -9,7 +9,15 @@ export type WorldBankIndicatorId =
     | 'unemployment'
     | 'current-account'
     | 'trade-balance'
-    | 'exchange-rate';
+    | 'exchange-rate'
+    // Previously-pending indicators now wired via best available World Bank proxies
+    | 'pmi-proxy'
+    | 'iip'
+    | 'retail-sales'
+    | 'wage-growth'
+    | 'real-income'
+    | 'neer'
+    | 'ppi-all';
 
 export interface WorldBankObservation {
     country: Country;
@@ -117,6 +125,63 @@ export const WORLD_BANK_INDICATORS: Record<WorldBankIndicatorId, WorldBankConfig
         sourceName: 'World Bank WDI / IMF International Financial Statistics',
         basePeriod: 'Local currency per US$',
         unit: 'LCU per USD',
+    },
+    // Previously-pending — now wired via best available World Bank public API proxies
+    'pmi-proxy': {
+        id: 'pmi-proxy',
+        indicatorCode: 'NV.IND.MANF.KD.ZG',
+        valueLabel: 'Manufacturing Value Added Growth',
+        sourceName: 'World Bank WDI / national accounts (Manufacturing VA growth, annual %)',
+        basePeriod: 'Annual % growth — proxy for industrial activity / PMI direction',
+        unit: '%',
+    },
+    'iip': {
+        id: 'iip',
+        indicatorCode: 'NV.IND.TOTL.KD.ZG',
+        valueLabel: 'Industry Value Added Growth',
+        sourceName: 'World Bank WDI / national accounts (Industry incl. construction, annual % growth)',
+        basePeriod: 'Annual % growth — best comparable IIP proxy across all 5 countries',
+        unit: '%',
+    },
+    'retail-sales': {
+        id: 'retail-sales',
+        indicatorCode: 'NE.CON.PRVT.KD.ZG',
+        valueLabel: 'Household Consumption Growth',
+        sourceName: 'World Bank WDI / national accounts (Household final consumption expenditure, annual % growth)',
+        basePeriod: 'Annual % growth — best comparable retail/consumer spending proxy',
+        unit: '%',
+    },
+    'wage-growth': {
+        id: 'wage-growth',
+        indicatorCode: 'SL.GDP.PCAP.EM.KD',
+        valueLabel: 'Labor Productivity (GDP per worker)',
+        sourceName: 'World Bank WDI / ILO (GDP per person employed, constant 2021 PPP USD)',
+        basePeriod: 'Constant 2021 PPP USD — best comparable wage/productivity proxy across all 5 countries',
+        unit: 'PPP USD',
+    },
+    'real-income': {
+        id: 'real-income',
+        indicatorCode: 'NE.CON.PRVT.PC.KD',
+        valueLabel: 'Household Consumption per Capita',
+        sourceName: 'World Bank WDI / national accounts (Household final consumption per capita, constant 2015 USD)',
+        basePeriod: 'Constant 2015 USD — best comparable real disposable income proxy across all 5 countries',
+        unit: 'Const. 2015 USD',
+    },
+    'neer': {
+        id: 'neer',
+        indicatorCode: 'PX.REX.REER',
+        valueLabel: 'Real Effective Exchange Rate (REER)',
+        sourceName: 'World Bank WDI / IMF IFS (REER, 2010=100 — closest available comparable to NEER)',
+        basePeriod: '2010=100 — REER is closest publicly available proxy for NEER across all 5 countries',
+        unit: 'Index (2010=100)',
+    },
+    'ppi-all': {
+        id: 'ppi-all',
+        indicatorCode: 'NY.GDP.DEFL.KD.ZG',
+        valueLabel: 'GDP Deflator (Price Proxy)',
+        sourceName: 'World Bank WDI / national accounts (GDP deflator, annual % — comparable producer price proxy)',
+        basePeriod: 'Annual % — best comparable multi-country price pressure proxy; US BLS PPI remains primary for USA',
+        unit: '%',
     },
 };
 
