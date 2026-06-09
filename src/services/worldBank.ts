@@ -1,6 +1,15 @@
 import type { Country } from '../data/economics';
 
-export type WorldBankIndicatorId = 'cpi' | 'import-prices';
+export type WorldBankIndicatorId =
+    | 'cpi'
+    | 'import-prices'
+    | 'gdp-growth'
+    | 'gdp-per-capita'
+    | 'total-wealth'
+    | 'unemployment'
+    | 'current-account'
+    | 'trade-balance'
+    | 'exchange-rate';
 
 export interface WorldBankObservation {
     country: Country;
@@ -15,6 +24,8 @@ interface WorldBankConfig {
     valueLabel: string;
     sourceName: string;
     basePeriod: string;
+    unit: string;
+    valueDivisor?: number;
 }
 
 const COUNTRY_CODES: Record<Country, string> = {
@@ -40,6 +51,7 @@ export const WORLD_BANK_INDICATORS: Record<WorldBankIndicatorId, WorldBankConfig
         valueLabel: 'CPI Index',
         sourceName: 'World Bank WDI / IMF International Financial Statistics',
         basePeriod: '2010=100',
+        unit: 'Index',
     },
     'import-prices': {
         id: 'import-prices',
@@ -47,6 +59,64 @@ export const WORLD_BANK_INDICATORS: Record<WorldBankIndicatorId, WorldBankConfig
         valueLabel: 'Import Unit Value',
         sourceName: 'World Bank WDI / UNCTAD',
         basePeriod: '2015=100',
+        unit: 'Index',
+    },
+    'gdp-growth': {
+        id: 'gdp-growth',
+        indicatorCode: 'NY.GDP.MKTP.KD.ZG',
+        valueLabel: 'GDP Growth',
+        sourceName: 'World Bank WDI / national accounts data',
+        basePeriod: 'Annual real GDP growth',
+        unit: '%',
+    },
+    'gdp-per-capita': {
+        id: 'gdp-per-capita',
+        indicatorCode: 'NY.GDP.PCAP.CD',
+        valueLabel: 'GDP per Capita',
+        sourceName: 'World Bank WDI / national accounts data',
+        basePeriod: 'Current US$',
+        unit: 'USD',
+    },
+    'total-wealth': {
+        id: 'total-wealth',
+        indicatorCode: 'NY.GDP.MKTP.CD',
+        valueLabel: 'GDP',
+        sourceName: 'World Bank WDI / national accounts data',
+        basePeriod: 'Current US$',
+        unit: 'Trillion USD',
+        valueDivisor: 1_000_000_000_000,
+    },
+    unemployment: {
+        id: 'unemployment',
+        indicatorCode: 'SL.UEM.TOTL.ZS',
+        valueLabel: 'Unemployment Rate',
+        sourceName: 'World Bank WDI / ILO estimates',
+        basePeriod: 'Total unemployment as % of labour force',
+        unit: '%',
+    },
+    'current-account': {
+        id: 'current-account',
+        indicatorCode: 'BN.CAB.XOKA.GD.ZS',
+        valueLabel: 'Current Account',
+        sourceName: 'World Bank WDI / IMF Balance of Payments Statistics',
+        basePeriod: '% of GDP',
+        unit: '% of GDP',
+    },
+    'trade-balance': {
+        id: 'trade-balance',
+        indicatorCode: 'NE.RSB.GNFS.ZS',
+        valueLabel: 'External Balance',
+        sourceName: 'World Bank WDI / national accounts data',
+        basePeriod: 'Goods and services external balance as % of GDP',
+        unit: '% of GDP',
+    },
+    'exchange-rate': {
+        id: 'exchange-rate',
+        indicatorCode: 'PA.NUS.FCRF',
+        valueLabel: 'Official Exchange Rate',
+        sourceName: 'World Bank WDI / IMF International Financial Statistics',
+        basePeriod: 'Local currency per US$',
+        unit: 'LCU per USD',
     },
 };
 
@@ -82,7 +152,7 @@ export const fetchWorldBankIndicatorData = async (
             country: COUNTRY_BY_ISO3[row.countryiso3code],
             iso3: row.countryiso3code,
             year: Number(row.date),
-            value: row.value as number,
+            value: (row.value as number) / (config.valueDivisor ?? 1),
         }))
         .sort((a, b) => a.year - b.year || a.country.localeCompare(b.country));
 };
