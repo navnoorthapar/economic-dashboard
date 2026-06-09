@@ -14,8 +14,26 @@ interface LeaderboardCardProps {
 export const LeaderboardCard = ({ metric, data, color = 'indigo' }: LeaderboardCardProps) => {
 
     const getRawValue = (d: EconomicData, m: Metric): number => {
-        const key = m === 'GDP' ? 'gdp' : m === 'GDP per Capita' ? 'gdpPerCapita' : m.charAt(0).toLowerCase() + m.slice(1).replace(/ /g, '');
-        return d[key as keyof EconomicData] as number;
+        const keyMap: Record<Metric, keyof EconomicData> = {
+            'GDP': 'gdp',
+            'GDP per Capita': 'gdpPerCapita',
+            'Growth Rate': 'growthRate',
+            'PMI': 'pmi',
+            'IIP': 'iip',
+            'Retail Sales': 'retailSales',
+            'CPI': 'cpi',
+            'PPI': 'ppi',
+            'Import Price Index': 'importPriceIndex',
+            'Unemployment Rate': 'unemployment',
+            'Wage Growth': 'wageGrowth',
+            'Real Disposable Income': 'realDisposableIncome',
+            'Current Account': 'currentAccount',
+            'Trade Balance': 'tradeBalance',
+            'Exchange Rate': 'exchangeRate',
+            'NEER': 'neer'
+        };
+        const value = d[keyMap[m]];
+        return typeof value === 'number' ? value : 0;
     }
 
     const sortedData = useMemo(() => {
@@ -42,7 +60,7 @@ export const LeaderboardCard = ({ metric, data, color = 'indigo' }: LeaderboardC
             case 'PMI':
             case 'IIP':
             case 'Import Price Index':
-            case 'NEER': return `${val} px`;
+            case 'NEER': return `${val} Index`;
             default: return `${val}`;
         }
     };

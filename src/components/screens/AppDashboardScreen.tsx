@@ -3,12 +3,15 @@ import { motion, AnimatePresence } from 'framer-motion';
 import type { Perspective, Indicator } from '../../types/perspective';
 import { PERSPECTIVES } from '../../types/perspective';
 import { Layout } from '../Layout';
-import { LeaderboardCard } from '../LeaderboardCard';
 import { AICard } from '../AICard';
 import { economicData, getCountryColor } from '../../data/economics';
-import type { Country, Metric } from '../../data/economics';
+import type { Country } from '../../data/economics';
+import { BLS_INDICATORS, fetchBlsIndicatorData, isCostOfLivingBlsIndicator } from '../../services/bls';
+import type { BlsObservation, CostOfLivingIndicatorId } from '../../services/bls';
+import { WORLD_BANK_INDICATORS, fetchWorldBankIndicatorData, isWorldBankCostIndicator } from '../../services/worldBank';
+import type { WorldBankIndicatorId, WorldBankObservation } from '../../services/worldBank';
 import {
-    AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer,
+    XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer,
     BarChart, Bar, LineChart, Line, Legend
 } from 'recharts';
 import { BarChart2, LineChart as LineChartIcon, Activity, Check, LayoutGrid, ArrowRight } from 'lucide-react';
@@ -23,7 +26,19 @@ interface AppDashboardScreenProps {
 }
 
 const COUNTRIES: Country[] = ['India', 'China', 'Japan', 'USA', 'Germany'];
-type ChartType = 'area' | 'line' | 'bar';
+type ChartType = 'line' | 'bar';
+type ChangeMetric = 'yoy' | 'mom' | 'qoq' | 'ytd';
+type BlsChartDataPoint = { label: string; value: number; yoy: number | null };
+type WorldBankChartDataPoint = { year: number } & Partial<Record<Country, number>>;
+
+interface ProcessedBlsObservation extends BlsObservation {
+    numericValue: number | null;
+    yoy: number | null;
+    mom: number | null;
+    qoq: number | null;
+    ytd: number | null;
+    zScores: Record<ChangeMetric, number | null>;
+}
 
 export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspective, onSwitchPerspective, isDark, toggleTheme }) => {
     const [selectedCountries, setSelectedCountries] = useState<Country[]>(['USA', 'India']);
@@ -32,23 +47,97 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
     const [isPerspectiveOpen, setIsPerspectiveOpen] = useState(false);
     const [isAboutExpanded, setIsAboutExpanded] = useState(false);
     const [viewMode, setViewMode] = useState<'chart' | 'table'>('chart');
-    const [apiData, setApiData] = useState<any[]>([]);
+    const [apiData, setApiData] = useState<BlsObservation[]>([]);
     const [isLoadingApiData, setIsLoadingApiData] = useState(false);
+    const [apiDataError, setApiDataError] = useState<string | null>(null);
+    const [worldBankData, setWorldBankData] = useState<WorldBankObservation[]>([]);
+    const [isLoadingWorldBankData, setIsLoadingWorldBankData] = useState(false);
+    const [worldBankDataError, setWorldBankDataError] = useState<string | null>(null);
+
+    const selectedBlsIndicatorId: CostOfLivingIndicatorId | null = selectedIndicator.id === 'ppi' && isCostOfLivingBlsIndicator(selectedIndicator.id) ? selectedIndicator.id : null;
+    const activeBlsConfig = selectedBlsIndicatorId ? BLS_INDICATORS[selectedBlsIndicatorId] : null;
+    const shouldUseBlsTable = perspective.id === 'cost-of-living' && activeBlsConfig !== null && selectedBlsIndicatorId !== null;
+    const shouldUseBlsChart = shouldUseBlsTable;
+    const selectedWorldBankIndicatorId: WorldBankIndicatorId | null = isWorldBankCostIndicator(selectedIndicator.id) ? selectedIndicator.id : null;
+    const activeWorldBankConfig = selectedWorldBankIndicatorId ? WORLD_BANK_INDICATORS[selectedWorldBankIndicatorId] : null;
+    const shouldUseWorldBankData = activeWorldBankConfig !== null && selectedWorldBankIndicatorId !== null;
 
     useEffect(() => {
-        if (perspective.id === 'cost-of-living' && selectedIndicator.id === 'cpi') {
-            setIsLoadingApiData(true);
-            fetch('http://localhost:8080/api/bls/cpi')
-                .then(res => res.json())
-                .then(data => {
-                    if (data.status === 'REQUEST_SUCCEEDED' && data.Results?.series?.length > 0) {
-                        setApiData(data.Results.series[0].data);
-                    }
-                })
-                .catch(err => console.error("Error fetching CPI data:", err))
-                .finally(() => setIsLoadingApiData(false));
+        if (!shouldUseBlsTable || !selectedBlsIndicatorId) {
+            return;
         }
-    }, [perspective.id, selectedIndicator.id]);
+
+        let isCancelled = false;
+
+        const loadBlsData = async () => {
+            setIsLoadingApiData(true);
+            setApiDataError(null);
+
+            try {
+                const data = await fetchBlsIndicatorData(selectedBlsIndicatorId);
+                if (isCancelled) return;
+
+                const series = data.Results?.series?.[0];
+
+                if (data.status === 'REQUEST_SUCCEEDED' && series) {
+                    const monthlyData = series.data.filter(row => /^M(0[1-9]|1[0-2])$/.test(row.period));
+                    setApiData(monthlyData);
+                } else {
+                    const message = data.message?.join(' ') || 'BLS did not return usable series data.';
+                    setApiData([]);
+                    setApiDataError(message);
+                }
+            } catch (error) {
+                if (isCancelled) return;
+
+                console.error('Error fetching BLS data:', error);
+                setApiData([]);
+                setApiDataError('Unable to load BLS data right now.');
+            } finally {
+                if (!isCancelled) setIsLoadingApiData(false);
+            }
+        };
+
+        void loadBlsData();
+
+        return () => {
+            isCancelled = true;
+        };
+    }, [selectedBlsIndicatorId, shouldUseBlsTable]);
+
+    useEffect(() => {
+        if (!shouldUseWorldBankData || !selectedWorldBankIndicatorId) {
+            return;
+        }
+
+        let isCancelled = false;
+
+        const loadWorldBankData = async () => {
+            setIsLoadingWorldBankData(true);
+            setWorldBankDataError(null);
+
+            try {
+                const data = await fetchWorldBankIndicatorData(selectedWorldBankIndicatorId, COUNTRIES);
+                if (isCancelled) return;
+
+                setWorldBankData(data);
+            } catch (error) {
+                if (isCancelled) return;
+
+                console.error('Error fetching World Bank data:', error);
+                setWorldBankData([]);
+                setWorldBankDataError('Unable to load World Bank data right now.');
+            } finally {
+                if (!isCancelled) setIsLoadingWorldBankData(false);
+            }
+        };
+
+        void loadWorldBankData();
+
+        return () => {
+            isCancelled = true;
+        };
+    }, [selectedWorldBankIndicatorId, shouldUseWorldBankData]);
 
     const processedApiData = useMemo(() => {
         if (!apiData || apiData.length === 0) return [];
@@ -97,7 +186,7 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
             return { ...row, yoy, mom, qoq, ytd };
         });
 
-        const metrics = ['yoy', 'mom', 'qoq', 'ytd'] as const;
+        const metrics: ChangeMetric[] = ['yoy', 'mom', 'qoq', 'ytd'];
         const stats: Record<string, { mean: number, std: number }> = {};
 
         metrics.forEach(m => {
@@ -119,8 +208,9 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                 qoq: row.qoq !== null ? (row.qoq - stats.qoq.mean) / stats.qoq.std : null,
                 ytd: row.ytd !== null ? (row.ytd - stats.ytd.mean) / stats.ytd.std : null,
             };
-            return { ...row, zScores };
-        });
+            const numericValue = row.value && !isNaN(parseFloat(row.value)) ? parseFloat(row.value) : null;
+            return { ...row, numericValue, zScores };
+        }) satisfies ProcessedBlsObservation[];
     }, [apiData]);
 
     const getHeatMapColor = (zScore: number | null) => {
@@ -153,41 +243,144 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
     };
     const t = themeClasses[perspective.color as keyof typeof themeClasses] || themeClasses.amber;
 
-    const getRawValue = (d: any, m: Metric) => {
-        const keyMap: Record<Metric, string> = {
-            'GDP': 'gdp',
-            'GDP per Capita': 'gdpPerCapita',
-            'Growth Rate': 'growthRate',
-            'PMI': 'pmi',
-            'IIP': 'iip',
-            'Retail Sales': 'retailSales',
-            'CPI': 'cpi',
-            'PPI': 'ppi',
-            'Import Price Index': 'importPriceIndex',
-            'Unemployment Rate': 'unemployment',
-            'Wage Growth': 'wageGrowth',
-            'Real Disposable Income': 'realDisposableIncome',
-            'Current Account': 'currentAccount',
-            'Trade Balance': 'tradeBalance',
-            'Exchange Rate': 'exchangeRate',
-            'NEER': 'neer'
-        };
-        const key = keyMap[m];
-        return d[key] as number || 0;
+    const getBlsChartData = (): BlsChartDataPoint[] => {
+        return processedApiData
+            .slice(0, 36)
+            .reverse()
+            .filter(row => row.numericValue !== null)
+            .map(row => ({
+                label: `${row.periodName.slice(0, 3)} ${row.year}`,
+                value: row.numericValue as number,
+                yoy: row.yoy,
+            }));
     };
 
-    const getChartData = () => {
-        const years = [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025];
-        return years.map(year => {
-            const dataPoint: any = { year };
+    const getWorldBankValue = (country: Country, year: number) => {
+        return worldBankData.find(row => row.country === country && row.year === year)?.value ?? null;
+    };
+
+    const calcWorldBankYoY = (country: Country, year: number) => {
+        const current = getWorldBankValue(country, year);
+        const previous = getWorldBankValue(country, year - 1);
+
+        if (current === null || previous === null || previous === 0) return null;
+        return ((current - previous) / previous) * 100;
+    };
+
+    const getWorldBankYears = () => {
+        return Array.from(new Set(worldBankData.map(row => row.year))).sort((a, b) => a - b);
+    };
+
+    const getWorldBankChartData = (): WorldBankChartDataPoint[] => {
+        return getWorldBankYears().map(year => {
+            const dataPoint: WorldBankChartDataPoint = { year };
+
             selectedCountries.forEach(country => {
-                const countryData = economicData.find(d => d.country === country && d.year === year);
-                if (countryData) {
-                    dataPoint[country] = getRawValue(countryData, selectedIndicator.metricKey);
-                }
+                const value = getWorldBankValue(country, year);
+                if (value !== null) dataPoint[country] = value;
             });
+
             return dataPoint;
         });
+    };
+
+    const formatOfficialValue = (value: number, unit?: string) => {
+        if (unit === 'USD') return `$${Math.round(value).toLocaleString()}`;
+        if (unit === 'Trillion USD') return `$${value.toFixed(2)}T`;
+        if (unit?.includes('%')) return `${value.toFixed(2)}%`;
+        if (unit === 'LCU per USD') return value.toFixed(2);
+        return `${value.toFixed(2)} ${unit ?? ''}`.trim();
+    };
+
+    const renderUnavailableDataState = (surface: 'chart' | 'table' | 'leaderboard') => (
+        <div className="flex flex-col justify-center items-center h-full px-4 text-center gap-3">
+            <span className={`text-[10px] font-black uppercase tracking-widest ${t.text400}`}>Real source pending</span>
+            <p className="text-sm text-slate-600 dark:text-slate-400 max-w-xl">
+                A reliable comparable public API has not been wired for {selectedIndicator.name} across India, China, Japan, USA, and Germany yet.
+                This {surface} is intentionally not showing dummy values.
+            </p>
+        </div>
+    );
+
+    const renderOfficialLeaderboard = () => {
+        if (shouldUseWorldBankData && activeWorldBankConfig) {
+            if (isLoadingWorldBankData) {
+                return (
+                    <div className="p-6 rounded-lg bg-black/5 dark:bg-slate-900/40 border border-[#433422]/10 dark:border-white/[0.05]">
+                        <span className={`text-sm ${t.text}`}>Loading World Bank data...</span>
+                    </div>
+                );
+            }
+
+            const latestYear = Math.max(...getWorldBankYears());
+            const rows = selectedCountries
+                .map(country => ({ country, value: getWorldBankValue(country, latestYear) }))
+                .filter((row): row is { country: Country; value: number } => row.value !== null)
+                .sort((a, b) => b.value - a.value)
+                .slice(0, 3);
+
+            if (!Number.isFinite(latestYear) || rows.length === 0) {
+                return (
+                    <div className="p-6 rounded-lg bg-black/5 dark:bg-slate-900/40 border border-[#433422]/10 dark:border-white/[0.05]">
+                        {renderUnavailableDataState('leaderboard')}
+                    </div>
+                );
+            }
+
+            return (
+                <div className="relative overflow-hidden p-6 rounded-lg transition-all duration-500 bg-black/5 dark:bg-slate-900/40 border border-[#433422]/10 dark:border-white/[0.05] shadow-sm">
+                    <div className={`absolute top-0 left-0 w-full h-0.5 ${perspective.color === 'red' ? 'bg-red-500/30' : perspective.color === 'amber' ? 'bg-amber-500/30' : perspective.color === 'emerald' ? 'bg-emerald-500/30' : 'bg-blue-500/30'}`} />
+                    <div className="flex items-center gap-2 mb-6">
+                        <Activity className={`w-3.5 h-3.5 ${t.text400}`} />
+                        <h3 className="font-black uppercase tracking-[0.2em] text-[10px] text-[#8c7b60] dark:text-slate-200">Top 3 {activeWorldBankConfig.valueLabel} ({latestYear})</h3>
+                    </div>
+                    <div className="space-y-4">
+                        {rows.map((row, index) => (
+                            <div key={row.country} className="flex items-center justify-between">
+                                <div className="flex items-center gap-4">
+                                    <div className="flex items-center justify-center w-8 h-8 rounded-full text-xs font-black bg-[#433422]/10 dark:bg-slate-700/50 text-[#8c7b60] dark:text-slate-400">{index + 1}</div>
+                                    <div className="flex flex-col">
+                                        <span className="text-sm font-bold text-[#433422] dark:text-slate-100">{row.country}</span>
+                                        <div className="h-0.5 w-10 rounded-full mt-1.5 opacity-40" style={{ backgroundColor: getCountryColor(row.country) }}></div>
+                                    </div>
+                                </div>
+                                <span className="font-bold text-[#8c7b60] dark:text-slate-400 text-base tracking-tight">
+                                    {formatOfficialValue(row.value, activeWorldBankConfig.unit)}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        if (shouldUseBlsTable && activeBlsConfig) {
+            const latest = processedApiData.find(row => row.numericValue !== null);
+
+            return (
+                <div className="relative overflow-hidden p-6 rounded-lg transition-all duration-500 bg-black/5 dark:bg-slate-900/40 border border-[#433422]/10 dark:border-white/[0.05] shadow-sm">
+                    <div className="absolute top-0 left-0 w-full h-0.5 bg-amber-500/30" />
+                    <div className="flex items-center gap-2 mb-6">
+                        <Activity className={`w-3.5 h-3.5 ${t.text400}`} />
+                        <h3 className="font-black uppercase tracking-[0.2em] text-[10px] text-[#8c7b60] dark:text-slate-200">Latest {activeBlsConfig.valueLabel}</h3>
+                    </div>
+                    {latest ? (
+                        <div className="flex items-center justify-between">
+                            <span className="text-sm font-bold text-[#433422] dark:text-slate-100">USA ({latest.periodName} {latest.year})</span>
+                            <span className="font-bold text-[#8c7b60] dark:text-slate-400 text-base tracking-tight">{latest.numericValue?.toFixed(3)}</span>
+                        </div>
+                    ) : (
+                        <span className="text-sm text-slate-500">Loading BLS data...</span>
+                    )}
+                </div>
+            );
+        }
+
+        return (
+            <div className="p-6 rounded-lg bg-black/5 dark:bg-slate-900/40 border border-[#433422]/10 dark:border-white/[0.05] min-h-[180px]">
+                {renderUnavailableDataState('leaderboard')}
+            </div>
+        );
     };
 
     const getInsightText = () => {
@@ -204,64 +397,151 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
     };
 
     const renderChart = () => {
-        const data = getChartData();
+        if (shouldUseWorldBankData && activeWorldBankConfig) {
+            if (isLoadingWorldBankData) return <div className="flex justify-center items-center h-full"><span className={`text-sm ${t.text}`}>Loading World Bank data...</span></div>;
+            if (worldBankDataError) return <div className="flex justify-center items-center h-full px-4 text-center"><span className="text-sm text-red-500 dark:text-red-300">{worldBankDataError}</span></div>;
 
-        if (chartType === 'line') {
+            const data = getWorldBankChartData();
+
+            if (data.length === 0) return <div className="flex justify-center items-center h-full"><span className="text-sm text-slate-500">No World Bank data available for this chart.</span></div>;
+
+            if (chartType === 'bar') {
+                return (
+                    <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
+                            <XAxis dataKey="year" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
+                            <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
+                            <RechartsTooltip formatter={(value: number | undefined) => [formatOfficialValue(Number(value ?? 0), activeWorldBankConfig.unit), activeWorldBankConfig.valueLabel]} labelStyle={{ color: '#0f172a' }} />
+                            <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
+                            {selectedCountries.map(c => (
+                                <Bar key={c} dataKey={c} fill={getCountryColor(c)} radius={[4, 4, 0, 0]} />
+                            ))}
+                        </BarChart>
+                    </ResponsiveContainer>
+                );
+            }
+
             return (
-                <LineChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
-                    <XAxis dataKey="year" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                    <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                    <RechartsTooltip formatter={(value: number | undefined) => [`${value ?? 0} ${selectedIndicator.unit || ''}`, '']} labelStyle={{ color: '#0f172a' }} />
-                    <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
-                    {selectedCountries.map(c => (
-                        <Line key={c} type="monotone" dataKey={c} stroke={getCountryColor(c)} strokeWidth={3} dot={{ r: 4, strokeWidth: 2 }} activeDot={{ r: 6 }} />
-                    ))}
-                </LineChart>
+                <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
+                        <XAxis dataKey="year" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
+                        <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
+                        <RechartsTooltip formatter={(value: number | undefined) => [formatOfficialValue(Number(value ?? 0), activeWorldBankConfig.unit), activeWorldBankConfig.valueLabel]} labelStyle={{ color: '#0f172a' }} />
+                        <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
+                        {selectedCountries.map(c => (
+                            <Line key={c} type="monotone" dataKey={c} stroke={getCountryColor(c)} strokeWidth={3} dot={{ r: 4, strokeWidth: 2 }} activeDot={{ r: 6 }} />
+                        ))}
+                    </LineChart>
+                </ResponsiveContainer>
             );
         }
 
-        if (chartType === 'bar') {
+        if (shouldUseBlsChart && activeBlsConfig) {
+            if (isLoadingApiData) return <div className="flex justify-center items-center h-full"><span className={`text-sm ${t.text}`}>Loading BLS API data...</span></div>;
+            if (apiDataError) return <div className="flex justify-center items-center h-full px-4 text-center"><span className="text-sm text-red-500 dark:text-red-300">{apiDataError}</span></div>;
+
+            const data = getBlsChartData();
+
+            if (data.length === 0) return <div className="flex justify-center items-center h-full"><span className="text-sm text-slate-500">No BLS data available for this chart.</span></div>;
+
+            if (chartType === 'bar') {
+                return (
+                    <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
+                            <XAxis dataKey="label" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} minTickGap={20} />
+                            <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
+                            <RechartsTooltip
+                                formatter={(value: number | undefined) => [`${Number(value ?? 0).toFixed(3)} Index`, activeBlsConfig.valueLabel]}
+                                labelStyle={{ color: '#0f172a' }}
+                            />
+                            <Bar dataKey="value" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                    </ResponsiveContainer>
+                );
+            }
+
             return (
-                <BarChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
-                    <XAxis dataKey="year" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                    <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                    <RechartsTooltip formatter={(value: number | undefined) => [`${value ?? 0} ${selectedIndicator.unit || ''}`, '']} labelStyle={{ color: '#0f172a' }} />
-                    <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
-                    {selectedCountries.map(c => (
-                        <Bar key={c} dataKey={c} fill={getCountryColor(c)} radius={[4, 4, 0, 0]} />
-                    ))}
-                </BarChart>
+                <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
+                        <XAxis dataKey="label" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} minTickGap={20} />
+                        <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
+                        <RechartsTooltip
+                            formatter={(value: number | undefined) => [`${Number(value ?? 0).toFixed(3)} Index`, activeBlsConfig.valueLabel]}
+                            labelStyle={{ color: '#0f172a' }}
+                        />
+                        <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
+                        <Line name={activeBlsConfig.valueLabel} type="monotone" dataKey="value" stroke="#f59e0b" strokeWidth={3} dot={{ r: 3, strokeWidth: 2 }} activeDot={{ r: 5 }} />
+                    </LineChart>
+                </ResponsiveContainer>
             );
         }
 
-        return (
-            <AreaChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
-                <defs>
-                    {selectedCountries.map(c => (
-                        <linearGradient key={c} id={`color${c}`} x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor={getCountryColor(c)} stopOpacity={0.3} />
-                            <stop offset="95%" stopColor={getCountryColor(c)} stopOpacity={0} />
-                        </linearGradient>
-                    ))}
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
-                <XAxis dataKey="year" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                <RechartsTooltip formatter={(value: number | undefined) => [`${value ?? 0} ${selectedIndicator.unit || ''}`, '']} labelStyle={{ color: '#0f172a' }} />
-                <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
-                {selectedCountries.map(c => (
-                    <Area key={c} type="monotone" dataKey={c} stroke={getCountryColor(c)} fillOpacity={1} fill={`url(#color${c})`} strokeWidth={2} />
-                ))}
-            </AreaChart>
-        );
+        return renderUnavailableDataState('chart');
     }
 
     const renderTable = () => {
-        if (perspective.id === 'cost-of-living' && selectedIndicator.id === 'cpi') {
+        if (shouldUseWorldBankData && activeWorldBankConfig) {
+            if (isLoadingWorldBankData) return <div className="flex justify-center items-center h-full"><span className={`text-sm ${t.text}`}>Loading World Bank data...</span></div>;
+            if (worldBankDataError) return <div className="flex justify-center items-center h-full px-4 text-center"><span className="text-sm text-red-500 dark:text-red-300">{worldBankDataError}</span></div>;
+
+            const years = getWorldBankYears().reverse();
+
+            if (years.length === 0) return <div className="flex justify-center items-center h-full"><span className="text-sm text-slate-500">No World Bank data available for this table.</span></div>;
+
+            return (
+                <div className="overflow-auto h-full pr-2 pb-2 custom-scrollbar border border-black/5 dark:border-white/5 rounded-lg">
+                    <table className="w-full text-left border-collapse text-xs md:text-sm">
+                        <thead className={`sticky top-0 bg-white/95 dark:bg-[#1a1c23]/95 backdrop-blur-md z-10 border-b ${isDark ? 'border-white/10' : 'border-black/10'}`}>
+                            <tr>
+                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400">Year</th>
+                                {selectedCountries.map(country => (
+                                    <th key={`${country}-value`} className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">{country} Value</th>
+                                ))}
+                                {selectedCountries.map(country => (
+                                    <th key={`${country}-yoy`} className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">{country} YoY %</th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {years.map(year => (
+                                <tr key={year} className={`border-b ${isDark ? 'border-white/5 hover:bg-white/5' : 'border-black/5 hover:bg-black/5'}`}>
+                                    <td className="p-3 font-medium text-slate-700 dark:text-slate-300">{year}</td>
+                                    {selectedCountries.map(country => {
+                                        const value = getWorldBankValue(country, year);
+                                        return (
+                                            <td key={`${country}-${year}-value`} className="p-3 font-bold text-slate-800 dark:text-slate-200 text-right">
+                                                {value !== null ? value.toFixed(2) : '-'}
+                                            </td>
+                                        );
+                                    })}
+                                    {selectedCountries.map(country => {
+                                        const yoy = calcWorldBankYoY(country, year);
+                                        return (
+                                            <td key={`${country}-${year}-yoy`} className="p-3 font-bold text-slate-800 dark:text-slate-200 text-right">
+                                                {yoy !== null ? (yoy > 0 ? '+' : '') + yoy.toFixed(2) + '%' : '-'}
+                                            </td>
+                                        );
+                                    })}
+                                </tr>
+                            ))}
+                        </tbody>
+                        <caption className="caption-bottom p-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#8c7b60] dark:text-slate-500">
+                            Source: {activeWorldBankConfig.sourceName} | {activeWorldBankConfig.indicatorCode} | {activeWorldBankConfig.basePeriod}. Annual data, so QoQ/YTD is not applicable.
+                        </caption>
+                    </table>
+                </div>
+            );
+        }
+
+        if (shouldUseBlsTable && activeBlsConfig) {
             if (isLoadingApiData) return <div className="flex justify-center items-center h-full"><span className={`text-sm ${t.text}`}>Loading BLS API data...</span></div>;
-            
+            if (apiDataError) return <div className="flex justify-center items-center h-full px-4 text-center"><span className="text-sm text-red-500 dark:text-red-300">{apiDataError}</span></div>;
+            if (processedApiData.length === 0) return <div className="flex justify-center items-center h-full"><span className="text-sm text-slate-500">No BLS data available for this indicator.</span></div>;
+
             return (
                 <div className="overflow-auto h-full pr-2 pb-2 custom-scrollbar border border-black/5 dark:border-white/5 rounded-lg">
                     <table className="w-full text-left border-collapse text-xs md:text-sm">
@@ -269,7 +549,7 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                             <tr>
                                 <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400">Year</th>
                                 <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400">Period</th>
-                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">CPI Value</th>
+                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">{activeBlsConfig.valueLabel}</th>
                                 <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">MoM %</th>
                                 <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">QoQ %</th>
                                 <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">YoY %</th>
@@ -281,7 +561,7 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                                 <tr key={i} className={`border-b ${isDark ? 'border-white/5 hover:bg-white/5' : 'border-black/5 hover:bg-black/5'}`}>
                                     <td className="p-3 font-medium text-slate-700 dark:text-slate-300">{row.year}</td>
                                     <td className="p-3 text-slate-600 dark:text-slate-400">{row.periodName}</td>
-                                    <td className="p-3 font-bold text-slate-800 dark:text-slate-200 text-right">{row.value}</td>
+                                    <td className="p-3 font-bold text-slate-800 dark:text-slate-200 text-right">{row.numericValue !== null ? row.numericValue.toFixed(3) : '-'}</td>
                                     <td className="p-3 font-bold text-right" style={{ backgroundColor: getHeatMapColor(row.zScores?.mom), color: getHeatMapTextColor(row.zScores?.mom, isDark) }}>
                                         {row.mom !== null ? (row.mom > 0 ? '+' : '') + row.mom.toFixed(2) + '%' : '-'}
                                     </td>
@@ -297,38 +577,15 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                                 </tr>
                             ))}
                         </tbody>
+                        <caption className="caption-bottom p-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#8c7b60] dark:text-slate-500">
+                            Source: {activeBlsConfig.sourceName} | Series {activeBlsConfig.seriesId} | {activeBlsConfig.basePeriod}
+                        </caption>
                     </table>
                 </div>
             );
         }
 
-        const data = getChartData();
-        return (
-            <div className="overflow-auto h-full pr-2 pb-2 custom-scrollbar border border-black/5 dark:border-white/5 rounded-lg">
-                <table className="w-full text-left border-collapse text-xs md:text-sm">
-                    <thead className={`sticky top-0 bg-white/95 dark:bg-[#1a1c23]/95 backdrop-blur-md z-10 border-b ${isDark ? 'border-white/10' : 'border-black/10'}`}>
-                        <tr>
-                            <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400">Year</th>
-                            {selectedCountries.map(c => (
-                                <th key={c} className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">{c}</th>
-                            ))}
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {data.map((row, i) => (
-                            <tr key={i} className={`border-b ${isDark ? 'border-white/5 hover:bg-white/5' : 'border-black/5 hover:bg-black/5'}`}>
-                                <td className="p-3 font-medium text-slate-700 dark:text-slate-300">{row.year}</td>
-                                {selectedCountries.map(c => (
-                                    <td key={c} className="p-3 font-bold text-slate-800 dark:text-slate-200 text-right">
-                                        {row[c] ? Number(row[c]).toFixed(2) : '-'}
-                                    </td>
-                                ))}
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
-            </div>
-        );
+        return renderUnavailableDataState('table');
     }
 
     return (
@@ -392,11 +649,7 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
 
                 <div className="grid grid-cols-1 md:grid-cols-1 lg:grid-cols-12 gap-4 items-start">
                     <div className="lg:col-span-3 flex flex-col gap-4">
-                        <LeaderboardCard
-                            metric={selectedIndicator.metricKey}
-                            data={economicData.filter(d => d.year === 2025)}
-                            color={perspective.color}
-                        />
+                        {renderOfficialLeaderboard()}
 
                         <div className="p-5 md:p-6 rounded-lg bg-white/40 dark:bg-white/[0.03] border border-[#433422]/10 dark:border-slate-800 shadow-sm transition-all duration-500">
                             <div className={`flex items-center gap-3 mb-3 ${t.text400}`}>
@@ -491,7 +744,7 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                                 </div>
 
                                 <div className="flex items-center gap-4">
-                                    {perspective.id === 'cost-of-living' && (
+                                    {(
                                         <div className="flex bg-black/5 dark:bg-white/[0.03] p-1 rounded-lg border border-[#433422]/10 dark:border-white/[0.05]">
                                             <button 
                                                 onClick={() => setViewMode('chart')}
@@ -505,7 +758,6 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                                     )}
                                     <div className="flex p-1 rounded-lg bg-black/5 dark:bg-white/[0.03] border border-[#433422]/10 dark:border-white/[0.05]">
                                         {([
-                                            { id: 'area', icon: Activity },
                                             { id: 'line', icon: LineChartIcon },
                                             { id: 'bar', icon: BarChart2 }
                                         ] as const).map(({ id, icon: Icon }) => {
@@ -528,15 +780,11 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                             </div>
 
                             <div className="w-full mt-2 transition-all h-[280px] md:h-[320px]">
-                                {viewMode === 'table' ? renderTable() : (
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        {renderChart()}
-                                    </ResponsiveContainer>
-                                )}
+                                {viewMode === 'table' ? renderTable() : renderChart()}
                             </div>
                         </div>
 
-                        <AICard insight={getInsightText() as any} color={perspective.color} />
+                        <AICard insight={getInsightText()} color={perspective.color} />
                     </div>
                 </div>
 
