@@ -6,9 +6,11 @@ import { Layout } from '../Layout';
 import { LeaderboardCard } from '../LeaderboardCard';
 import { AICard } from '../AICard';
 import { economicData, getCountryColor } from '../../data/economics';
-import type { Country, Metric } from '../../data/economics';
+import type { Country, EconomicData, Metric } from '../../data/economics';
+import { BLS_INDICATORS, fetchBlsIndicatorData, isCostOfLivingBlsIndicator } from '../../services/bls';
+import type { BlsObservation, CostOfLivingIndicatorId } from '../../services/bls';
 import {
-    AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer,
+    XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer,
     BarChart, Bar, LineChart, Line, Legend
 } from 'recharts';
 import { BarChart2, LineChart as LineChartIcon, Activity, Check, LayoutGrid, ArrowRight } from 'lucide-react';
@@ -23,7 +25,19 @@ interface AppDashboardScreenProps {
 }
 
 const COUNTRIES: Country[] = ['India', 'China', 'Japan', 'USA', 'Germany'];
-type ChartType = 'area' | 'line' | 'bar';
+type ChartType = 'line' | 'bar';
+type ChangeMetric = 'yoy' | 'mom' | 'qoq' | 'ytd';
+type ChartDataPoint = { year: number } & Partial<Record<Country, number>>;
+type BlsChartDataPoint = { label: string; value: number; yoy: number | null };
+
+interface ProcessedBlsObservation extends BlsObservation {
+    numericValue: number | null;
+    yoy: number | null;
+    mom: number | null;
+    qoq: number | null;
+    ytd: number | null;
+    zScores: Record<ChangeMetric, number | null>;
+}
 
 export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspective, onSwitchPerspective, isDark, toggleTheme }) => {
     const [selectedCountries, setSelectedCountries] = useState<Country[]>(['USA', 'India']);
@@ -32,23 +46,57 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
     const [isPerspectiveOpen, setIsPerspectiveOpen] = useState(false);
     const [isAboutExpanded, setIsAboutExpanded] = useState(false);
     const [viewMode, setViewMode] = useState<'chart' | 'table'>('chart');
-    const [apiData, setApiData] = useState<any[]>([]);
+    const [apiData, setApiData] = useState<BlsObservation[]>([]);
     const [isLoadingApiData, setIsLoadingApiData] = useState(false);
+    const [apiDataError, setApiDataError] = useState<string | null>(null);
+
+    const selectedBlsIndicatorId: CostOfLivingIndicatorId | null = isCostOfLivingBlsIndicator(selectedIndicator.id) ? selectedIndicator.id : null;
+    const activeBlsConfig = selectedBlsIndicatorId ? BLS_INDICATORS[selectedBlsIndicatorId] : null;
+    const shouldUseBlsTable = perspective.id === 'cost-of-living' && activeBlsConfig !== null && selectedBlsIndicatorId !== null;
+    const shouldUseBlsChart = shouldUseBlsTable;
 
     useEffect(() => {
-        if (perspective.id === 'cost-of-living' && selectedIndicator.id === 'cpi') {
-            setIsLoadingApiData(true);
-            fetch('http://localhost:8080/api/bls/cpi')
-                .then(res => res.json())
-                .then(data => {
-                    if (data.status === 'REQUEST_SUCCEEDED' && data.Results?.series?.length > 0) {
-                        setApiData(data.Results.series[0].data);
-                    }
-                })
-                .catch(err => console.error("Error fetching CPI data:", err))
-                .finally(() => setIsLoadingApiData(false));
+        if (!shouldUseBlsTable || !selectedBlsIndicatorId) {
+            return;
         }
-    }, [perspective.id, selectedIndicator.id]);
+
+        let isCancelled = false;
+
+        const loadBlsData = async () => {
+            setIsLoadingApiData(true);
+            setApiDataError(null);
+
+            try {
+                const data = await fetchBlsIndicatorData(selectedBlsIndicatorId);
+                if (isCancelled) return;
+
+                const series = data.Results?.series?.[0];
+
+                if (data.status === 'REQUEST_SUCCEEDED' && series) {
+                    const monthlyData = series.data.filter(row => /^M(0[1-9]|1[0-2])$/.test(row.period));
+                    setApiData(monthlyData);
+                } else {
+                    const message = data.message?.join(' ') || 'BLS did not return usable series data.';
+                    setApiData([]);
+                    setApiDataError(message);
+                }
+            } catch (error) {
+                if (isCancelled) return;
+
+                console.error('Error fetching BLS data:', error);
+                setApiData([]);
+                setApiDataError('Unable to load BLS data right now.');
+            } finally {
+                if (!isCancelled) setIsLoadingApiData(false);
+            }
+        };
+
+        void loadBlsData();
+
+        return () => {
+            isCancelled = true;
+        };
+    }, [selectedBlsIndicatorId, shouldUseBlsTable]);
 
     const processedApiData = useMemo(() => {
         if (!apiData || apiData.length === 0) return [];
@@ -97,7 +145,7 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
             return { ...row, yoy, mom, qoq, ytd };
         });
 
-        const metrics = ['yoy', 'mom', 'qoq', 'ytd'] as const;
+        const metrics: ChangeMetric[] = ['yoy', 'mom', 'qoq', 'ytd'];
         const stats: Record<string, { mean: number, std: number }> = {};
 
         metrics.forEach(m => {
@@ -119,8 +167,9 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                 qoq: row.qoq !== null ? (row.qoq - stats.qoq.mean) / stats.qoq.std : null,
                 ytd: row.ytd !== null ? (row.ytd - stats.ytd.mean) / stats.ytd.std : null,
             };
-            return { ...row, zScores };
-        });
+            const numericValue = row.value && !isNaN(parseFloat(row.value)) ? parseFloat(row.value) : null;
+            return { ...row, numericValue, zScores };
+        }) satisfies ProcessedBlsObservation[];
     }, [apiData]);
 
     const getHeatMapColor = (zScore: number | null) => {
@@ -153,8 +202,8 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
     };
     const t = themeClasses[perspective.color as keyof typeof themeClasses] || themeClasses.amber;
 
-    const getRawValue = (d: any, m: Metric) => {
-        const keyMap: Record<Metric, string> = {
+    const getRawValue = (d: EconomicData, m: Metric) => {
+        const keyMap: Record<Metric, keyof EconomicData> = {
             'GDP': 'gdp',
             'GDP per Capita': 'gdpPerCapita',
             'Growth Rate': 'growthRate',
@@ -173,13 +222,14 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
             'NEER': 'neer'
         };
         const key = keyMap[m];
-        return d[key] as number || 0;
+        const value = d[key];
+        return typeof value === 'number' ? value : 0;
     };
 
     const getChartData = () => {
         const years = [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025];
         return years.map(year => {
-            const dataPoint: any = { year };
+            const dataPoint: ChartDataPoint = { year };
             selectedCountries.forEach(country => {
                 const countryData = economicData.find(d => d.country === country && d.year === year);
                 if (countryData) {
@@ -188,6 +238,18 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
             });
             return dataPoint;
         });
+    };
+
+    const getBlsChartData = (): BlsChartDataPoint[] => {
+        return processedApiData
+            .slice(0, 36)
+            .reverse()
+            .filter(row => row.numericValue !== null)
+            .map(row => ({
+                label: `${row.periodName.slice(0, 3)} ${row.year}`,
+                value: row.numericValue as number,
+                yoy: row.yoy,
+            }));
     };
 
     const getInsightText = () => {
@@ -204,25 +266,69 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
     };
 
     const renderChart = () => {
+        if (shouldUseBlsChart && activeBlsConfig) {
+            if (isLoadingApiData) return <div className="flex justify-center items-center h-full"><span className={`text-sm ${t.text}`}>Loading BLS API data...</span></div>;
+            if (apiDataError) return <div className="flex justify-center items-center h-full px-4 text-center"><span className="text-sm text-red-500 dark:text-red-300">{apiDataError}</span></div>;
+
+            const data = getBlsChartData();
+
+            if (data.length === 0) return <div className="flex justify-center items-center h-full"><span className="text-sm text-slate-500">No BLS data available for this chart.</span></div>;
+
+            if (chartType === 'bar') {
+                return (
+                    <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
+                            <XAxis dataKey="label" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} minTickGap={20} />
+                            <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
+                            <RechartsTooltip
+                                formatter={(value: number | undefined) => [`${Number(value ?? 0).toFixed(3)} Index`, activeBlsConfig.valueLabel]}
+                                labelStyle={{ color: '#0f172a' }}
+                            />
+                            <Bar dataKey="value" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                    </ResponsiveContainer>
+                );
+            }
+
+            return (
+                <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
+                        <XAxis dataKey="label" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} minTickGap={20} />
+                        <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
+                        <RechartsTooltip
+                            formatter={(value: number | undefined) => [`${Number(value ?? 0).toFixed(3)} Index`, activeBlsConfig.valueLabel]}
+                            labelStyle={{ color: '#0f172a' }}
+                        />
+                        <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
+                        <Line name={activeBlsConfig.valueLabel} type="monotone" dataKey="value" stroke="#f59e0b" strokeWidth={3} dot={{ r: 3, strokeWidth: 2 }} activeDot={{ r: 5 }} />
+                    </LineChart>
+                </ResponsiveContainer>
+            );
+        }
+
         const data = getChartData();
 
         if (chartType === 'line') {
             return (
-                <LineChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
-                    <XAxis dataKey="year" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                    <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                    <RechartsTooltip formatter={(value: number | undefined) => [`${value ?? 0} ${selectedIndicator.unit || ''}`, '']} labelStyle={{ color: '#0f172a' }} />
-                    <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
-                    {selectedCountries.map(c => (
-                        <Line key={c} type="monotone" dataKey={c} stroke={getCountryColor(c)} strokeWidth={3} dot={{ r: 4, strokeWidth: 2 }} activeDot={{ r: 6 }} />
-                    ))}
-                </LineChart>
+                <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
+                        <XAxis dataKey="year" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
+                        <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
+                        <RechartsTooltip formatter={(value: number | undefined) => [`${value ?? 0} ${selectedIndicator.unit || ''}`, '']} labelStyle={{ color: '#0f172a' }} />
+                        <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
+                        {selectedCountries.map(c => (
+                            <Line key={c} type="monotone" dataKey={c} stroke={getCountryColor(c)} strokeWidth={3} dot={{ r: 4, strokeWidth: 2 }} activeDot={{ r: 6 }} />
+                        ))}
+                    </LineChart>
+                </ResponsiveContainer>
             );
         }
 
-        if (chartType === 'bar') {
-            return (
+        return (
+            <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
                     <XAxis dataKey="year" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
@@ -233,35 +339,16 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                         <Bar key={c} dataKey={c} fill={getCountryColor(c)} radius={[4, 4, 0, 0]} />
                     ))}
                 </BarChart>
-            );
-        }
-
-        return (
-            <AreaChart data={data} margin={{ top: 20, right: 30, left: 10, bottom: 0 }}>
-                <defs>
-                    {selectedCountries.map(c => (
-                        <linearGradient key={c} id={`color${c}`} x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor={getCountryColor(c)} stopOpacity={0.3} />
-                            <stop offset="95%" stopColor={getCountryColor(c)} stopOpacity={0} />
-                        </linearGradient>
-                    ))}
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.05} vertical={false} />
-                <XAxis dataKey="year" stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                <YAxis stroke="#475569" fontSize={10} tickLine={false} axisLine={false} />
-                <RechartsTooltip formatter={(value: number | undefined) => [`${value ?? 0} ${selectedIndicator.unit || ''}`, '']} labelStyle={{ color: '#0f172a' }} />
-                <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
-                {selectedCountries.map(c => (
-                    <Area key={c} type="monotone" dataKey={c} stroke={getCountryColor(c)} fillOpacity={1} fill={`url(#color${c})`} strokeWidth={2} />
-                ))}
-            </AreaChart>
+            </ResponsiveContainer>
         );
     }
 
     const renderTable = () => {
-        if (perspective.id === 'cost-of-living' && selectedIndicator.id === 'cpi') {
+        if (shouldUseBlsTable && activeBlsConfig) {
             if (isLoadingApiData) return <div className="flex justify-center items-center h-full"><span className={`text-sm ${t.text}`}>Loading BLS API data...</span></div>;
-            
+            if (apiDataError) return <div className="flex justify-center items-center h-full px-4 text-center"><span className="text-sm text-red-500 dark:text-red-300">{apiDataError}</span></div>;
+            if (processedApiData.length === 0) return <div className="flex justify-center items-center h-full"><span className="text-sm text-slate-500">No BLS data available for this indicator.</span></div>;
+
             return (
                 <div className="overflow-auto h-full pr-2 pb-2 custom-scrollbar border border-black/5 dark:border-white/5 rounded-lg">
                     <table className="w-full text-left border-collapse text-xs md:text-sm">
@@ -269,7 +356,7 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                             <tr>
                                 <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400">Year</th>
                                 <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400">Period</th>
-                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">CPI Value</th>
+                                <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">{activeBlsConfig.valueLabel}</th>
                                 <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">MoM %</th>
                                 <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">QoQ %</th>
                                 <th className="p-3 font-semibold uppercase tracking-wider text-[#8c7b60] dark:text-slate-400 text-right">YoY %</th>
@@ -281,7 +368,7 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                                 <tr key={i} className={`border-b ${isDark ? 'border-white/5 hover:bg-white/5' : 'border-black/5 hover:bg-black/5'}`}>
                                     <td className="p-3 font-medium text-slate-700 dark:text-slate-300">{row.year}</td>
                                     <td className="p-3 text-slate-600 dark:text-slate-400">{row.periodName}</td>
-                                    <td className="p-3 font-bold text-slate-800 dark:text-slate-200 text-right">{row.value}</td>
+                                    <td className="p-3 font-bold text-slate-800 dark:text-slate-200 text-right">{row.numericValue !== null ? row.numericValue.toFixed(3) : '-'}</td>
                                     <td className="p-3 font-bold text-right" style={{ backgroundColor: getHeatMapColor(row.zScores?.mom), color: getHeatMapTextColor(row.zScores?.mom, isDark) }}>
                                         {row.mom !== null ? (row.mom > 0 ? '+' : '') + row.mom.toFixed(2) + '%' : '-'}
                                     </td>
@@ -297,6 +384,9 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                                 </tr>
                             ))}
                         </tbody>
+                        <caption className="caption-bottom p-3 text-left text-[10px] font-bold uppercase tracking-widest text-[#8c7b60] dark:text-slate-500">
+                            Source: {activeBlsConfig.sourceName} | Series {activeBlsConfig.seriesId} | {activeBlsConfig.basePeriod}
+                        </caption>
                     </table>
                 </div>
             );
@@ -505,7 +595,6 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                                     )}
                                     <div className="flex p-1 rounded-lg bg-black/5 dark:bg-white/[0.03] border border-[#433422]/10 dark:border-white/[0.05]">
                                         {([
-                                            { id: 'area', icon: Activity },
                                             { id: 'line', icon: LineChartIcon },
                                             { id: 'bar', icon: BarChart2 }
                                         ] as const).map(({ id, icon: Icon }) => {
@@ -528,15 +617,11 @@ export const AppDashboardScreen: React.FC<AppDashboardScreenProps> = ({ perspect
                             </div>
 
                             <div className="w-full mt-2 transition-all h-[280px] md:h-[320px]">
-                                {viewMode === 'table' ? renderTable() : (
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        {renderChart()}
-                                    </ResponsiveContainer>
-                                )}
+                                {viewMode === 'table' ? renderTable() : renderChart()}
                             </div>
                         </div>
 
-                        <AICard insight={getInsightText() as any} color={perspective.color} />
+                        <AICard insight={getInsightText()} color={perspective.color} />
                     </div>
                 </div>
 

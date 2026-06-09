@@ -1,6 +1,7 @@
 async function testFetch() {
     try {
-        const res = await fetch('http://localhost:8080/api/bls/cpi');
+        const indicator = process.argv[2] ?? 'cpi';
+        const res = await fetch(`http://localhost:8080/api/bls/${indicator}`);
         const data = await res.json();
         
         if (!data || !data.Results || !data.Results.series || !data.Results.series[0]) {
